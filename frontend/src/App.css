@@ -1,0 +1,14 @@
+@import "tailwindcss";
+.btn-blue {
+  @apply bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg shadow-md;
+}
+.btn-green {
+  @apply bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg shadow-md;
+}
+.btn-red {
+  @apply bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg shadow-md;
+}
+
+body{
+  background-color: #fef9f6;
+}
