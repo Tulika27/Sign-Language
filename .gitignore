@@ -1,0 +1,7 @@
+venv/
+venv_old/
+word-model-test/INCLUDE/include_no_cnn_transformer_large.pth
+word-model-test/INCLUDE/.git/
+word-model-test/INCLUDE/__pycache__/
+__pycache__/
+*.pyc

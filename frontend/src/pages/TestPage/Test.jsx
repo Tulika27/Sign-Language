@@ -47,8 +47,9 @@ function Test() {
 
             <TestField
              image='src/assets/basicword.jpg'
-             heading='Basic Word Test' subHeading='Test Basic word using Sign Language' 
-            linkTo='/bwordtest'
+             heading='Word Detection' subHeading='Detect an isolated Indian Sign Language word'
+             linkTo='/test/wordtest'
+             lockTo={false}
             />
 
             <TestField 
@@ -59,7 +60,8 @@ function Test() {
             <TestField 
             image='src/assets/basicSentence.jpg'
             heading='Basic Sentence Test' subHeading='Test small sentence using sign language' 
-            linkTo='/bsentencetest'/>
+            linkTo='/test/bsentencetest'
+            lockTo={false}/>
          
             <TestField 
             image='src/assets/talk.jpg'

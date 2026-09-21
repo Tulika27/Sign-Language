@@ -15,6 +15,8 @@ import UserContextProvider from './Context/UserContextProvider'
 import Dashboard from './pages/Profile/Dashboard'
 import PageNotFound from './Components/PageNotFound'
 import IndianSignTest from './pages/Module/IndianSignTest'
+import WordTest from './pages/Module/WordTest'
+import SentenceTest from './pages/Module/SentenceTest'
 import Forgot from './pages/Auth/Forgot'
 import ResetPassword from './pages/Auth/ResetPassword'
 
@@ -45,6 +47,10 @@ function App() {
                   element={<PrivateRoute element={<NumberTest />}/>} />
                 <Route path='/test/islTest'
                   element={<PrivateRoute element={<IndianSignTest />}/>} />
+                <Route path='/test/wordtest'
+                  element={<PrivateRoute element={<WordTest />}/>} />
+                <Route path='bsentencetest'
+                  element={<PrivateRoute element={<SentenceTest />}/>} />
                 <Route path='/test/alphabet'
                 element={<PrivateRoute element={<AlphaTest />}/>} />
              </Route>
@@ -58,6 +64,12 @@ function App() {
 
             <Route path="/number-result"
               element={<PrivateRoute element={<Result category={'Number'} totalSign={10} />} />} />
+
+            <Route path="/word-result"
+              element={<PrivateRoute element={<Result category={'Word'} totalSign={5} />} />} />
+
+            <Route path="/sentence-result"
+              element={<PrivateRoute element={<Result category={'Sentence'} totalSign={5} />} />} />
 
             <Route path="/account"
               element={<PrivateRoute element={<Account />} />} />
