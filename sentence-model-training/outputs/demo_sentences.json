@@ -1,0 +1,29 @@
+{
+  "demo_sentences": [
+    {
+      "uid": "thank_you_so_much",
+      "english": "thank you so much",
+      "gloss": "THANK YOU SO MUCH"
+    },
+    {
+      "uid": "how_old_are_you",
+      "english": "how old are you",
+      "gloss": "HOW OLD YOU"
+    },
+    {
+      "uid": "can_i_help_you",
+      "english": "can i help you",
+      "gloss": "I HELP YOU"
+    },
+    {
+      "uid": "do_not_worry",
+      "english": "do not worry",
+      "gloss": "DO NOT WORRY"
+    },
+    {
+      "uid": "you_are_welcome",
+      "english": "you are welcome",
+      "gloss": "YOU WELCOME"
+    }
+  ]
+}

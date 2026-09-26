@@ -61,3 +61,26 @@ def format_gloss_to_sentence(glosses: List[str]) -> str:
             sentence += "."
 
     return sentence
+
+
+DEMO_GLOSS_TO_ENGLISH = {
+    "thank you so much": "Thank you so much",
+    "how old you": "How old are you",
+    "i help you": "Can I help you",
+    "do not worry": "Do not worry",
+    "you welcome": "You are welcome",
+}
+
+
+def format_gloss_to_english(gloss_text: str) -> str:
+    """
+    Convert a predicted gloss sequence to a natural English sentence.
+    Uses an exact lookup against known reliable demo sentences (Step 8B).
+    Falls back to a capitalized gloss string with a marker if the
+    predicted sequence is outside the current reliable demo set.
+    """
+    key = gloss_text.strip().lower()
+    if key in DEMO_GLOSS_TO_ENGLISH:
+        return DEMO_GLOSS_TO_ENGLISH[key]
+    return gloss_text.strip().capitalize() + " (unrecognized sentence)"
+
