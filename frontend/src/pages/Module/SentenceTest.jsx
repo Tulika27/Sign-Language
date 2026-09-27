@@ -4,76 +4,75 @@ import { Hands } from "@mediapipe/hands";
 import * as cameraUtils from "@mediapipe/camera_utils";
 import UserContext from "../../Context/UserContext";
 
-const BASE_URL = "http://localhost:4996";
-const TEST_LENGTH = 5;
-const MAX_CAPTURE_FRAMES = 90;
-const MIN_CAPTURE_FRAMES = 8;
-const MIN_STABLE_CONFIDENCE = 0.5;
+const SENTENCE_API_URL = "http://localhost:5002/predict/sentence";
 const SCORE_API_URL = "http://localhost:5001/api/create";
+const TEST_LENGTH = 5;
+const MAX_RECORD_MS = 6000;
+const MIN_RECORD_MS = 800;
 
-const SENTENCE_CANDIDATES = [
-  { text: "GOOD MORNING", labels: ["good", "morning"] },
-  { text: "GOOD AFTERNOON", labels: ["good", "afternoon"] },
-  { text: "GOOD EVENING", labels: ["good", "evening"] },
-  { text: "GOOD NIGHT", labels: ["good", "night"] },
-  { text: "HOW ARE YOU", labels: ["howareyou"] },
-  { text: "THANK YOU", labels: ["thankyou"] },
+// These 5 sentences are the ones the trained sentence model reliably
+// recognizes (see Step 8B). Order is fixed for consistent demo behavior.
+const DEMO_SENTENCES = [
+  { english: "thank you so much", gloss: "THANK YOU SO MUCH" },
+  { english: "how old are you", gloss: "HOW OLD YOU" },
+  { english: "can i help you", gloss: "I HELP YOU" },
+  { english: "do not worry", gloss: "DO NOT WORRY" },
+  { english: "you are welcome", gloss: "YOU WELCOME" },
 ];
 
-const chooseSentences = (labels) => {
-  const available = SENTENCE_CANDIDATES.filter((sentence) =>
-    sentence.labels.every((label) => labels.includes(label)),
-  );
-  return [...available].sort(() => Math.random() - 0.5).slice(0, TEST_LENGTH);
-};
+const normalize = (text) => (text || "").trim().toLowerCase().replace(/\s+/g, " ");
 
 function SentenceTest() {
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);
   const overlayCanvasRef = useRef(null);
   const streamRef = useRef(null);
   const handsRef = useRef(null);
   const handCameraRef = useRef(null);
-  const captureTimerRef = useRef(null);
-  const framesRef = useRef([]);
+  const mediaRecorderRef = useRef(null);
+  const recordedChunksRef = useRef([]);
+  const recordTimeoutRef = useRef(null);
+  const recordStartRef = useRef(0);
+  const fileInputRef = useRef(null);
+
   const { correct, setCorrect } = useContext(UserContext);
   const navigate = useNavigate();
 
-  const [targetSentences, setTargetSentences] = useState([]);
-  const [questionResults, setQuestionResults] = useState([]);
+  const [targetSentences] = useState(DEMO_SENTENCES);
+  const [questionResults, setQuestionResults] = useState(new Array(TEST_LENGTH).fill(null));
   const [currentQuestion, setCurrentQuestion] = useState(0);
-  const [detectedWords, setDetectedWords] = useState([]);
   const [attempts, setAttempts] = useState(0);
-  const [prediction, setPrediction] = useState(null);
+  const [prediction, setPrediction] = useState(null); // { gloss, english }
   const [isCameraOn, setIsCameraOn] = useState(false);
-  const [isCapturing, setIsCapturing] = useState(false);
-  const [message, setMessage] = useState("Loading supported sentences...");
+  const [isRecording, setIsRecording] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const [message, setMessage] = useState("Start the camera or upload a video to begin.");
 
   const targetSentence = targetSentences[currentQuestion];
-  const expectedLabel = targetSentence?.labels[detectedWords.length] || "";
-  const testFinished = targetSentences.length > 0 && currentQuestion >= targetSentences.length;
+  const testFinished = currentQuestion >= targetSentences.length;
+  const autoSubmittedRef = useRef(false);
 
   useEffect(() => {
-    fetch(`${BASE_URL}/labels`)
-      .then((response) => response.json())
-      .then((data) => {
-        const sentences = chooseSentences(data.labels || []);
-        if (sentences.length < TEST_LENGTH) {
-          throw new Error("Not enough supported sentence labels.");
-        }
-        setTargetSentences(sentences);
-        setQuestionResults(new Array(TEST_LENGTH).fill(null));
-        setCorrect(0);
-        setMessage("Start the camera to begin.");
-      })
-      .catch(() => setMessage("Unable to load supported INCLUDE sentences."));
-
+    setCorrect(0);
     return () => stopCamera();
-  }, [setCorrect]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (testFinished && !autoSubmittedRef.current) {
+      autoSubmittedRef.current = true;
+      complete(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [testFinished]);
 
   function stopCamera() {
-    clearInterval(captureTimerRef.current);
-    captureTimerRef.current = null;
+    clearTimeout(recordTimeoutRef.current);
+    recordTimeoutRef.current = null;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    mediaRecorderRef.current = null;
     handCameraRef.current?.stop();
     handCameraRef.current = null;
     handsRef.current?.close();
@@ -90,7 +89,7 @@ function SentenceTest() {
       );
     }
     setIsCameraOn(false);
-    setIsCapturing(false);
+    setIsRecording(false);
   }
 
   const drawLiveHands = (results) => {
@@ -124,24 +123,27 @@ function SentenceTest() {
     });
   };
 
-  const captureFrame = () => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < 2 || framesRef.current.length >= MAX_CAPTURE_FRAMES) return;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
-    canvas.toBlob((blob) => {
-      if (blob) framesRef.current.push(blob);
-    }, "image/jpeg", 0.85);
+  const pickSupportedMimeType = () => {
+    const candidates = [
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+      "video/mp4",
+    ];
+    for (const type of candidates) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(type)) return type;
+    }
+    return "";
   };
 
   const startCamera = async () => {
     if (testFinished || !targetSentence || attempts >= 5) return;
+    setUploadedFile(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       streamRef.current = stream;
       videoRef.current.srcObject = stream;
+
       const hands = new Hands({
         locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
       });
@@ -161,12 +163,30 @@ function SentenceTest() {
         height: 480,
       });
       handCameraRef.current.start();
-      framesRef.current = [];
+
+      recordedChunksRef.current = [];
+      const mimeType = pickSupportedMimeType();
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) recordedChunksRef.current.push(event.data);
+      };
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      recordStartRef.current = Date.now();
+
       setPrediction(null);
       setIsCameraOn(true);
-      setIsCapturing(true);
-      setMessage(`Perform the sign for "${expectedLabel}" and click Detect.`);
-      captureTimerRef.current = setInterval(captureFrame, 120);
+      setIsRecording(true);
+      setMessage(`Perform the full sign for "${targetSentence.english}", then click Detect.`);
+
+      recordTimeoutRef.current = setTimeout(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+          setMessage("Max recording length reached. Detecting...");
+          detectFromRecording();
+        }
+      }, MAX_RECORD_MS);
     } catch (error) {
       setMessage(`Camera unavailable: ${error.message}`);
     }
@@ -175,79 +195,115 @@ function SentenceTest() {
   const advanceQuestion = () => {
     stopCamera();
     setAttempts(0);
-    setDetectedWords([]);
+    setPrediction(null);
+    setUploadedFile(null);
     setCurrentQuestion((question) => question + 1);
     if (currentQuestion + 1 >= targetSentences.length) {
       setMessage("All sentences attempted. Submit your test to see the result.");
     } else {
-      setMessage("Start the camera for the next sentence.");
+      setMessage("Start the camera or upload a video for the next sentence.");
     }
   };
 
-  const detectWord = async () => {
-    if (!isCapturing || testFinished) return;
-    clearInterval(captureTimerRef.current);
-    captureTimerRef.current = null;
-    setIsCapturing(false);
-    if (framesRef.current.length < MIN_CAPTURE_FRAMES) {
-      setMessage("Capture a slightly longer gesture before detecting.");
-      setIsCapturing(true);
-      captureTimerRef.current = setInterval(captureFrame, 120);
-      return;
-    }
+  const sendVideoForPrediction = async (blob, extension) => {
+    setIsProcessing(true);
+    setMessage("Detecting sentence...");
 
-    const capturedFrames = [...framesRef.current];
-    framesRef.current = [];
     const formData = new FormData();
-    capturedFrames.forEach((frame, index) => formData.append("frames", frame, `frame-${index}.jpg`));
-    setMessage("Detecting word...");
+    formData.append("video", blob, `capture.${extension}`);
+
     try {
-      const response = await fetch(`${BASE_URL}/predict/word`, { method: "POST", body: formData });
+      const response = await fetch(SENTENCE_API_URL, { method: "POST", body: formData });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Prediction failed.");
-      const label = String(data.label || "").toLowerCase();
-      setPrediction({ ...data, label });
 
-      if (data.confidence >= MIN_STABLE_CONFIDENCE && label === expectedLabel) {
-        const nextWords = [...detectedWords, label];
-        setDetectedWords(nextWords);
-        if (nextWords.length === targetSentence.labels.length) {
-          if (questionResults[currentQuestion] !== true) {
-            setQuestionResults((results) => {
-              const nextResults = [...results];
-              nextResults[currentQuestion] = true;
-              return nextResults;
-            });
-            setCorrect((value) => value + 1);
-          }
-          setMessage("Correct");
-          setTimeout(advanceQuestion, 500);
-        } else {
-          framesRef.current = [];
-          setIsCapturing(true);
-          captureTimerRef.current = setInterval(captureFrame, 120);
-          setMessage("Correct. Continue with the next sign.");
+      setPrediction(data);
+      setIsProcessing(false);
+
+      const isMatch = normalize(data.english) === normalize(targetSentence.english);
+      if (isMatch) {
+        if (questionResults[currentQuestion] !== true) {
+          setQuestionResults((results) => {
+            const nextResults = [...results];
+            nextResults[currentQuestion] = true;
+            return nextResults;
+          });
+          setCorrect((value) => value + 1);
         }
+        setMessage(`Correct! "${data.english}"`);
+        stopCamera();
+        setTimeout(advanceQuestion, 800);
       } else {
         const nextAttempts = attempts + 1;
         setAttempts(nextAttempts);
-        setDetectedWords([]);
         stopCamera();
-        setMessage(nextAttempts >= 5
-          ? "Maximum attempts reached. Use Next / Skip."
-          : data.confidence < MIN_STABLE_CONFIDENCE
-            ? "Unstable detection. Try Again"
-            : "Try Again");
+        setMessage(
+          nextAttempts >= 5
+            ? `Maximum attempts reached. Detected "${data.english}". Use Next / Skip.`
+            : `Detected "${data.english}". Try Again`,
+        );
       }
     } catch (error) {
-      setMessage(error.message);
+      setIsProcessing(false);
       stopCamera();
+      setMessage(
+        error.message === "Failed to fetch"
+          ? "Unable to reach the sentence server. Please start the backend and try again."
+          : error.message,
+      );
     }
+  };
+
+  const detectFromRecording = async () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive" || testFinished) return;
+    clearTimeout(recordTimeoutRef.current);
+    recordTimeoutRef.current = null;
+
+    const elapsed = Date.now() - recordStartRef.current;
+    if (elapsed < MIN_RECORD_MS) {
+      setMessage("Capture a slightly longer gesture before detecting.");
+      return;
+    }
+
+    setIsRecording(false);
+
+    const stopped = new Promise((resolve) => {
+      recorder.onstop = resolve;
+    });
+    recorder.stop();
+    await stopped;
+
+    const mimeType = recorder.mimeType || "video/webm";
+    const extension = mimeType.includes("mp4") ? "mp4" : "webm";
+    const videoBlob = new Blob(recordedChunksRef.current, { type: mimeType });
+    recordedChunksRef.current = [];
+
+    await sendVideoForPrediction(videoBlob, extension);
+  };
+
+  const handleFileChange = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    stopCamera();
+    setPrediction(null);
+    setUploadedFile(file);
+    setMessage(`Selected "${file.name}". Click Detect to run prediction.`);
+  };
+
+  const detectFromUpload = async () => {
+    if (!uploadedFile || testFinished) return;
+    const extension = uploadedFile.name.split(".").pop() || "mp4";
+    await sendVideoForPrediction(uploadedFile, extension);
   };
 
   const tryAgain = () => {
     setPrediction(null);
-    startCamera();
+    if (uploadedFile) {
+      setMessage(`Selected "${uploadedFile.name}". Click Detect to run prediction again.`);
+    } else {
+      startCamera();
+    }
   };
 
   const skipQuestion = () => {
@@ -261,13 +317,13 @@ function SentenceTest() {
   };
 
   const previousQuestion = () => {
-    if (currentQuestion === 0 || isCapturing) return;
+    if (currentQuestion === 0 || isRecording) return;
     stopCamera();
     setCurrentQuestion((question) => question - 1);
     setAttempts(0);
-    setDetectedWords([]);
     setPrediction(null);
-    setMessage("Start the camera to retry this sentence.");
+    setUploadedFile(null);
+    setMessage("Start the camera or upload a video to retry this sentence.");
   };
 
   const complete = async (quit = false) => {
@@ -290,9 +346,11 @@ function SentenceTest() {
       if (!response.ok) throw new Error(data.error || "Failed to submit test result");
       navigate(quit ? "/test" : "/sentence-result");
     } catch (error) {
-      setMessage(error.message === "Failed to fetch"
-        ? "Unable to reach the test server. Please start the backend and try again."
-        : error.message);
+      setMessage(
+        error.message === "Failed to fetch"
+          ? "Unable to reach the test server. Please start the backend and try again."
+          : error.message,
+      );
     }
   };
 
@@ -303,36 +361,107 @@ function SentenceTest() {
       </div>
 
       <div className="flex w-full flex-col rounded-2xl text-center font-sans text-2xl font-bold text-red-500">
-        <h2>Make Signs for: <span className="text-3xl text-gray-500">&quot;{targetSentence?.text || "Loading..."}&quot;</span></h2>
-        <h2>Detected Words: <span className="text-3xl font-bold text-green-600">{detectedWords.join(" ") || "----"}</span></h2>
-        <h2>Detected Word: <span className="text-3xl font-bold text-green-600">{prediction?.label || "----"} ({prediction ? (prediction.confidence * 100).toFixed(1) : "0"}%)</span></h2>
-        <p className="text-lg text-emerald-800">Sentence {Math.min(currentQuestion + 1, TEST_LENGTH)} / {TEST_LENGTH} | Attempts: {attempts} / 5</p>
+        <h2>
+          Make Signs for: <span className="text-3xl text-gray-500">&quot;{targetSentence?.english || "Loading..."}&quot;</span>
+        </h2>
+        <h2>
+          Predicted Gloss: <span className="text-3xl font-bold text-green-600">{prediction?.gloss || "----"}</span>
+        </h2>
+        <h2>
+          Predicted Sentence: <span className="text-3xl font-bold text-green-600">{prediction?.english || "----"}</span>
+        </h2>
+        <p className="text-lg text-emerald-800">
+          Sentence {Math.min(currentQuestion + 1, TEST_LENGTH)} / {TEST_LENGTH} | Attempts: {attempts} / 5
+        </p>
       </div>
 
       <div className="relative h-[480px] w-[640px] max-w-full">
-        <video ref={videoRef} autoPlay playsInline className={`absolute left-0 top-0 h-full w-full rounded-lg border-2 border-black object-cover shadow-lg ${isCameraOn ? "block" : "hidden"}`} />
-        <canvas ref={overlayCanvasRef} width="640" height="480" className={`absolute left-0 top-0 h-full w-full border-2 border-black ${isCameraOn ? "block" : "hidden"}`} />
-        <canvas ref={canvasRef} className="hidden" />
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={`absolute left-0 top-0 h-full w-full rounded-lg border-2 border-black object-cover shadow-lg ${isCameraOn ? "block" : "hidden"}`}
+        />
+        <canvas
+          ref={overlayCanvasRef}
+          width="640"
+          height="480"
+          className={`absolute left-0 top-0 h-full w-full border-2 border-black ${isCameraOn ? "block" : "hidden"}`}
+        />
+        {!isCameraOn && (
+          <div className="flex h-full w-full items-center justify-center rounded-lg border-2 border-dashed border-gray-400 bg-white text-gray-500">
+            {uploadedFile ? `Ready: ${uploadedFile.name}` : "Camera preview / uploaded video will appear here"}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 flex items-center gap-3">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="video/*"
+          onChange={handleFileChange}
+          className="hidden"
+        />
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={testFinished || isRecording}
+          className="rounded-lg bg-sky-500 px-4 py-2 text-white shadow-lg hover:bg-sky-600 disabled:opacity-50"
+        >
+          Upload Video
+        </button>
+        {uploadedFile && <span className="text-sm text-slate-600">{uploadedFile.name}</span>}
       </div>
 
       <div className="mt-5 flex w-full justify-between gap-5 px-10 lg:px-35">
-        <button onClick={previousQuestion} disabled={currentQuestion === 0 || isCapturing} className="rounded-lg bg-violet-500 px-4 py-2 text-white shadow-lg hover:bg-violet-600 disabled:opacity-50">Prev</button>
+        <button
+          onClick={previousQuestion}
+          disabled={currentQuestion === 0 || isRecording}
+          className="rounded-lg bg-violet-500 px-4 py-2 text-white shadow-lg hover:bg-violet-600 disabled:opacity-50"
+        >
+          Prev
+        </button>
         <div className="flex gap-3">
-          <button onClick={startCamera} disabled={isCameraOn || testFinished || attempts >= 5} className="rounded-lg bg-green-500 px-4 py-2 text-white shadow-lg hover:bg-green-600 disabled:opacity-50">Start</button>
-          <button onClick={detectWord} disabled={!isCapturing} className="rounded-lg bg-orange-500 px-4 py-2 text-white shadow-lg hover:bg-orange-600 disabled:opacity-50">Detect</button>
+          <button
+            onClick={startCamera}
+            disabled={isCameraOn || testFinished || attempts >= 5}
+            className="rounded-lg bg-green-500 px-4 py-2 text-white shadow-lg hover:bg-green-600 disabled:opacity-50"
+          >
+            Start
+          </button>
+          <button
+            onClick={isCameraOn ? detectFromRecording : detectFromUpload}
+            disabled={(!isRecording && !uploadedFile) || isProcessing}
+            className="rounded-lg bg-orange-500 px-4 py-2 text-white shadow-lg hover:bg-orange-600 disabled:opacity-50"
+          >
+            {isProcessing ? "Detecting..." : "Detect"}
+          </button>
         </div>
-        <button onClick={skipQuestion} disabled={attempts < 5 || testFinished} className="rounded-lg bg-violet-500 px-4 py-2 text-white shadow-lg hover:bg-violet-600 disabled:opacity-50">Next / Skip</button>
+        <button
+          onClick={skipQuestion}
+          disabled={attempts < 5 || testFinished}
+          className="rounded-lg bg-violet-500 px-4 py-2 text-white shadow-lg hover:bg-violet-600 disabled:opacity-50"
+        >
+          Next / Skip
+        </button>
       </div>
 
       <p className="mt-4 text-lg font-semibold text-slate-700">{message}</p>
 
-      {prediction && prediction.label !== expectedLabel && attempts < 5 && !testFinished && (
-        <button onClick={tryAgain} className="mt-3 rounded-lg bg-orange-500 px-5 py-2 font-bold text-white hover:bg-orange-600">Try Again</button>
+      {prediction && normalize(prediction.english) !== normalize(targetSentence?.english) && attempts < 5 && !testFinished && (
+        <button onClick={tryAgain} className="mt-3 rounded-lg bg-orange-500 px-5 py-2 font-bold text-white hover:bg-orange-600">
+          Try Again
+        </button>
       )}
 
       <div className="mb-8 mt-5 flex gap-4">
-        <button onClick={() => complete(false)} className="rounded-lg bg-green-500 px-4 py-2 font-bold text-white shadow-lg hover:bg-green-600">Complete Test</button>
-        <button onClick={() => complete(true)} className="rounded-lg bg-red-500 px-4 py-2 font-bold text-white shadow-lg hover:bg-red-600">Quit Test</button>
+        <button onClick={() => complete(false)} className="rounded-lg bg-green-500 px-4 py-2 font-bold text-white shadow-lg hover:bg-green-600">
+          Complete Test
+        </button>
+        <button onClick={() => complete(true)} className="rounded-lg bg-red-500 px-4 py-2 font-bold text-white shadow-lg hover:bg-red-600">
+          Quit Test
+        </button>
       </div>
     </div>
   );
